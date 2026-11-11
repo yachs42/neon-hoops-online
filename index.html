@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEON HOOPS 7.4 — CUSTOM CONTROLS</title>
+<title>NEON HOOPS 7.7 — RENDER RESTORED</title>
 <style>
 :root{color-scheme:dark;--ink:#e9faff;--muted:#8eabc4;--pink:#ff568a;--cyan:#42e9f5;--bg:#080e21}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#202950 0,#0a1024 58%,#060a16 100%);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace;display:flex;align-items:center;justify-content:center;padding:18px;overflow-x:hidden}
@@ -28,7 +28,7 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
 </head>
 <body>
 <main class="shell">
- <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.4</div></header>
+ <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.7 · RENDER</div></header>
  <div class="frame" id="frame">
   <canvas id="game" width="480" height="270" aria-label="Пиксельный баскетбол"></canvas>
   <div class="hud hidden" id="hud"><div class="score"><span class="num left" id="scoreL">0</span><div class="versus"><strong>VS</strong>ДО 5 ОЧКОВ</div><span class="num right" id="scoreR">0</span></div></div>
@@ -156,11 +156,11 @@ const net={socket:null,role:null,active:false,code:'',token:'',serverUrl:'',last
 let remoteKeys={};
 // Snapshot timeline: smooth other players and the ball independently of packet arrival.
 // Keep guest's own low-latency local prediction unchanged.
-const SMOOTH_DELAY_MS=76, SNAPSHOT_PERIOD_MS=34;
+const SMOOTH_DELAY_MS=54, SNAPSHOT_PERIOD_MS=34;
 let visualHistory=[],visualOffset=NaN,visualJitter=0,visualLastArrival=0,visualPhase='';
 let renderFps=0,fpsSamples=0,fpsLastUpdate=0;
-let backgroundCache=null;
-function clearVisualHistory(){visualHistory=[];visualOffset=NaN;visualJitter=0;visualLastArrival=0;visualPhase='';}
+let backgroundCache=null,guestTrails=[];
+function clearVisualHistory(){visualHistory=[];visualOffset=NaN;visualJitter=0;visualLastArrival=0;visualPhase='';guestTrails=[];}
 function storeVisualSnapshot(s){
  if(!Number.isFinite(s.seq)||!Array.isArray(s.players)||s.players.length<2)return;
  const now=performance.now(),arrivalGap=visualLastArrival?now-visualLastArrival:SNAPSHOT_PERIOD_MS;
@@ -181,12 +181,47 @@ function storeVisualSnapshot(s){
  if(visualHistory.length>14)visualHistory.shift();
 }
 function between(a,b,t){return a+(b-a)*t;}
+
+// The ball is held at the drawn hand rather than above the character's head.
+function heldBallAtHand(p){
+ const f=p.facing||1;
+ const sway=Math.sin((p.anim||0)*.18)*Math.min(2,Math.abs(p.vx||0));
+ const t=p.dunk?clamp(p.dunk.progress/p.dunk.duration,0,1):0;
+ const hanging=p.finishDunk?.variant==='hang'&&p.finishDunk.frame<=30;
+ if(p.dunk||hanging){
+  if(p.dunk?.variant==='spin'&&t>.30&&t<.82){
+   const a=(t-.30)/.52*Math.PI*2;
+   return {x:p.x+f*(8+Math.sin(a)*8),y:p.y-17-Math.cos(a)*10};
+  }
+  const extend=hanging?1:ease(clamp((t-.20)/.47,0,1));
+  return {x:p.x+f*(4+extend*4),y:p.y-1-extend*23};
+ }
+ if(p.charging||p.shotPose>0){
+  const charge=p.charging?ease(clamp(p.charge/45,0,1)):0;
+  const follow=p.shotPose>0?Math.min(ease((20-p.shotPose)/4),ease(p.shotPose/9)):0;
+  const h=ease(Math.max(charge,follow));
+  return {x:p.x+f*7,y:p.y+9-h*31};
+ }
+ return {x:p.x+f*10,y:p.y+10-sway+Math.sin(clock*.32)*.5};
+}
+// Guest rebuilds the trail from the actually displayed interpolated ball.
+// Host's historical trail is time-shifted relative to the displayed ball and looks glitchy.
+function tickGuestTrails(displayBall){
+ for(const t of guestTrails)t.t--;
+ guestTrails=guestTrails.filter(t=>t.t>0);
+ if(!displayBall||displayBall.owner>=0){guestTrails=[];return;}
+ const last=guestTrails[guestTrails.length-1];
+ if(!last||Math.hypot(displayBall.x-last.x,displayBall.y-last.y)>1.5){
+  guestTrails.push({x:displayBall.x,y:displayBall.y,t:12});
+  if(guestTrails.length>10)guestTrails.shift();
+ }
+}
 function sampleVisual(now){
  if(!visualHistory.length)return null;
  const history=visualHistory;
  if(history.length===1)return {p:history[0].p,b:history[0].b};
  // A modest adaptive jitter buffer avoids packet-to-packet jumps under VPN.
- const target=now-visualOffset-SMOOTH_DELAY_MS-Math.min(35,visualJitter*.8);
+ const target=now-visualOffset-SMOOTH_DELAY_MS-Math.min(38,visualJitter*.9);
  let a=history[0],b=history[1],factor=0;
  if(target<=a.t)return {p:a.p,b:a.b};
  for(let i=1;i<history.length;i++){
@@ -343,14 +378,10 @@ function showOnline(){
  closeOnline();phase='lobby';ui.menu.classList.add('hidden');ui.pause.classList.add('hidden');ui.end.classList.add('hidden');ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.online.classList.remove('hidden');
  $('onlineControls').classList.remove('hidden');$('inviteBox').classList.add('hidden');
  const saved=new URLSearchParams(window.location.search).get('room');if(saved)$('joinCode').value=saved.toUpperCase().slice(0,6);
- const q=new URLSearchParams(location.search),layero=location.hostname.endsWith('.layero.app');
- let savedServer='';try{savedServer=localStorage.getItem('neon-hoops-server-v1')||'';}catch{}
- const candidate=q.get('server')||savedServer;
- let chosen=candidate;
- if(layero&&candidate){try{if(new URL(candidate).hostname.endsWith('.layero.app'))chosen='';}catch{chosen='';}}
- const preferred=chosen||(layero?'https://neon-hoops-online.onrender.com':((location.protocol==='http:'||location.protocol==='https:')?location.origin:'http://localhost:3000'));
- $('serverInput').value=preferred;
- $('serverInfo').textContent=layero?'Layero показывает сайт, но для комнат нужен WebSocket-сервер. По умолчанию используется Render; при необходимости укажи другой сервер.':'Оба игрока должны подключиться к одному WebSocket-серверу.';
+ const isLocal=['localhost','127.0.0.1'].includes(location.hostname);
+ // Do not remember obsolete Layero/P2P endpoints. Public matchmaking always uses Render.
+ $('serverInput').value=isLocal?location.origin:'https://neon-hoops-online.onrender.com';
+ $('serverInfo').textContent='Комнаты и игровой сервер работают через Render · WebSocket. P2P не используется.';
  netText('Создай комнату или введи код друга.');keys={};
 }
 function onlineSocketUrl(){
@@ -361,15 +392,11 @@ function onlineSocketUrl(){
  url.pathname='/ws';url.search='';url.hash='';return url.toString();
 }
 function inviteLink(){
- // Share the same WEBSITE (Layero, Render or localhost) and carry backend in query.
- // This avoids sending Layero visitors to Render's page when only Render hosts WS.
- const page=(location.protocol==='http:'||location.protocol==='https:')?location.origin:$('serverInput').value.trim();
- const u=new URL(page);if(u.protocol==='ws:')u.protocol='http:';if(u.protocol==='wss:')u.protocol='https:';
- u.pathname='/';u.search='';u.searchParams.set('room',net.code);
- const backend=$('serverInput').value.trim();const remote=new URL(backend);
- if(remote.protocol==='ws:')remote.protocol='http:';if(remote.protocol==='wss:')remote.protocol='https:';
- if(remote.origin!==u.origin)u.searchParams.set('server',remote.origin);
- u.hash='';return u.toString();
+ // Guests should open the actual Render game, not a former GitHub Pages or Layero shell.
+ const u=new URL($('serverInput').value.trim());
+ if(u.protocol==='ws:')u.protocol='http:';if(u.protocol==='wss:')u.protocol='https:';
+ u.pathname='/';u.search='';u.searchParams.set('room',net.code);u.hash='';
+ return u.toString();
 }
 function showMatchUI(){
  ui.menu.classList.add('hidden');ui.online.classList.add('hidden');ui.pause.classList.add('hidden');
@@ -416,7 +443,7 @@ function openNetSocket(mode,epoch){
   if(net.socket!==sock||epoch!==net.epoch)return;
   net.socket=null;unlock();
   if(net.token){scheduleReconnect();return}
-  revertToLobby(location.hostname.endsWith('.layero.app')&&new URL(net.serverUrl).hostname.endsWith('.layero.app')?'Layero не держит игровые WebSocket-комнаты. Укажи сервер Render в поле выше. (1006)':'Не удалось подключиться. Проверь адрес WebSocket-сервера. ('+event.code+')');
+  revertToLobby('Нет связи с игровым сервером Render ('+event.code+'). Проверь интернет или статус Render.');
  };
  sock.onmessage=e=>{
   if(net.socket!==sock||epoch!==net.epoch)return;
@@ -503,7 +530,7 @@ function loadSnapshot(s){
  phase=s.phase;clock=s.clock;roundStart=s.roundStart;points=s.points;
  players=s.players;ball=s.ball;
  if(net.role==='guest'){storeVisualSnapshot(s);reconcileGuest(s.players[1],s.inputAck);}
- if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};particles=s.particles||[];trails=s.trails||[];waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
+ if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};particles=s.particles||[];trails=net.role==='guest'?[]:(s.trails||[]);waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
  $('scoreL').textContent=points[0];$('scoreR').textContent=points[1];
  if(s.toastTimer>0){ui.toast.textContent=s.toast;ui.toast.classList.remove('hidden')}else ui.toast.classList.add('hidden');
  if(phase==='ended'&&was!=='ended')showEndUI();
@@ -517,7 +544,7 @@ function publishSnapshot(force=false){
  if(net.socket.bufferedAmount>28*1024)return; // drop stale frames instead of queuing delay.
  const state={seq:Math.floor(now),inputAck:net.lastRemoteInputSeq||0,phase,clock,roundStart,points,
   players:players.map(p=>({...p,ghosts:p.ghosts.slice(-3)})),ball,
-  particles:particles.slice(-12),trails:trails.slice(-9),waves:waves.slice(-4),glassFX,
+  particles:particles.slice(-12),waves:waves.slice(-4),glassFX,
   glassShards:glassShards.slice(-16),flash,shake,toastTimer,toast:ui.toast.textContent};
  if(netSend({type:'snapshot',state})){net.lastSnapshotAt=now;net.lastPhase=phase;}
 }
@@ -984,18 +1011,8 @@ function rimBounce(h){
 }
 function advanceBall(){
  if(ball.owner>=0){
-  const p=players[ball.owner];
-  const raising=p.charging?clamp(.20+p.charge/65,0,.95):0;
-  ball.x=p.x+p.facing*(8+raising*1.5);
-  ball.y=p.dunk?p.y-22+Math.min(4,p.dunk.progress/p.dunk.duration*4):p.y-4-raising*17+Math.sin(clock*.33)*(1-raising)*1.2;
-  if(p.dunk?.variant==='spin'){
-   const u=p.dunk.progress/p.dunk.duration;
-   if(u>.30&&u<.82){
-    const a=(u-.30)/.52*Math.PI*2;
-    ball.x=p.x+p.facing*(8+Math.sin(a)*8);
-    ball.y=p.y-17-Math.cos(a)*10;
-   }
-  }
+  const p=players[ball.owner],hand=heldBallAtHand(p);
+  ball.x=hand.x;ball.y=hand.y;
   ball.netEntry=-1;ball.netEntryAge=0;
   ball.vx=p.vx;ball.vy=p.vy;ball.spin+=.15;return;
  }
@@ -1230,12 +1247,16 @@ function loop(now){
   accum+=elapsed;let steps=0;
   while(accum>=1000/60&&steps<5){tickPrediction();accum-=1000/60;steps++;}
   if(players.length){
-   const authoritativePlayers=players,authoritativeBall=ball;
+   const authoritativePlayers=players,authoritativeBall=ball,authoritativeTrails=trails;
    const visual=sampleVisual(now);
    players=[visual?visual.p:players[0],guestPred?{...players[1],...guestPred}:players[1]];
    ball=visual?visual.b:ball;
-   if(ball.owner===1&&guestPred){ball={...ball,x:guestPred.x+guestPred.facing*8,y:guestPred.y-6};}
-   try{draw();}finally{players=authoritativePlayers;ball=authoritativeBall;}
+   if(ball.owner===0||ball.owner===1){
+    const p=players[ball.owner];
+    if(p){const hand=heldBallAtHand(p);ball={...ball,x:hand.x,y:hand.y};}
+   }
+   tickGuestTrails(ball);trails=guestTrails;
+   try{draw();}finally{players=authoritativePlayers;ball=authoritativeBall;trails=authoritativeTrails;}
   }else draw();
  }else{
   if(net.active&&net.suspended){accum=0;}
