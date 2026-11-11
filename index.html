@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEON HOOPS 7.3 — SMOOTH PLAY</title>
+<title>NEON HOOPS 7.4 — CUSTOM CONTROLS</title>
 <style>
 :root{color-scheme:dark;--ink:#e9faff;--muted:#8eabc4;--pink:#ff568a;--cyan:#42e9f5;--bg:#080e21}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#202950 0,#0a1024 58%,#060a16 100%);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace;display:flex;align-items:center;justify-content:center;padding:18px;overflow-x:hidden}
@@ -13,11 +13,22 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
 .connectionAlert{position:absolute;top:50px;left:50%;transform:translateX(-50%);background:#1c2648e8;border:1px solid #83d5f2;color:#eaffff;text-align:center;font-size:11px;font-weight:900;letter-spacing:.04em;padding:9px 13px;z-index:5;pointer-events:none;max-width:90%}
 /* Online room UI */
 .netInput{font:800 14px ui-monospace,Consolas,monospace;color:#e9faff;background:#0a1532;border:2px solid #49648e;padding:11px 12px;outline:none;min-width:0;width:100%;text-align:center;letter-spacing:.05em}.netInput:focus{border-color:#73eefa}.netInput.room{width:170px;letter-spacing:.22em;text-transform:uppercase;font-size:20px}.netField{max-width:425px;margin:10px auto}.netField label{display:block;color:#abc5df;font-size:11px;margin-bottom:5px}.netRow{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:12px}.netStatus{color:#9fe9fd;min-height:36px;font-size:12px;line-height:1.6;margin:8px auto;max-width:460px}.netHint{font-size:11px;line-height:1.6;color:#a3b8d7}.inviteBox{margin:12px auto;background:#132344;border:1px solid #3a597c;padding:10px;max-width:420px}.inviteCode{font-size:33px;letter-spacing:.26em;color:#8df5ff;font-weight:1000}.onlineBadge{position:absolute;left:13px;top:16px;color:#9cf1ff;font-size:9px;font-weight:900;letter-spacing:.1em;background:#09142dcc;border:1px solid #416280;padding:7px;pointer-events:none}.btn:disabled{opacity:.55;cursor:default}.roomEmpty{color:#889ab6}.netOnly{display:none}
+
+/* Key binding menu */
+.keyGrid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:15px 0;text-align:left}
+.keyMap{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px;background:#0d1b39;border:1px solid #395478;font-size:12px}
+.keyMap .btn{min-width:100px;padding:8px 9px;text-transform:none}
+.keyMap .btn.listening{background:#2a6958;border-color:#70ffc9;animation:pulseBind .8s infinite alternate}
+#keyStatus{min-height:38px;font-size:11px;line-height:1.5;color:#a9c5e6}
+#controlSummary{font-size:11px;line-height:1.8;color:#b9d4eb}
+#serverInfo{font-size:10px;line-height:1.6;color:#accde1;max-width:425px;margin:6px auto}
+@keyframes pulseBind{from{box-shadow:0 0 0 #70ffc900}to{box-shadow:0 0 11px #70ffc966}}
+@media(max-width:560px){.keyGrid{grid-template-columns:1fr}.keyMap{padding:6px}}
 </style>
 </head>
 <body>
 <main class="shell">
- <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.3</div></header>
+ <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.4</div></header>
  <div class="frame" id="frame">
   <canvas id="game" width="480" height="270" aria-label="Пиксельный баскетбол"></canvas>
   <div class="hud hidden" id="hud"><div class="score"><span class="num left" id="scoreL">0</span><div class="versus"><strong>VS</strong>ДО 5 ОЧКОВ</div><span class="num right" id="scoreR">0</span></div></div>
@@ -27,13 +38,28 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
    <div class="panel"><h1 class="logo">NEON <span>HOOPS</span></h1>
     
     <div id="difficultyBox"><div class="field-title">Сложность бота</div><div class="switches"><button class="btn" data-diff="easy">ЛЕГКО</button><button class="btn selected" data-diff="normal">НОРМАЛЬНО</button><button class="btn" data-diff="hard">СЛОЖНО</button><button class="btn" data-diff="legend">☠ ЛЕГЕНДА</button></div></div>
-    <div class="actions"><button class="btn primary" id="startBtn">▶ ОДИН ИГРОК</button><button class="btn" id="onlineBtn">◎ ОНЛАЙН 1 НА 1</button></div>
+    <div class="actions"><button class="btn primary" id="startBtn">▶ ОДИН ИГРОК</button><button class="btn" id="onlineBtn">◎ ОНЛАЙН 1 НА 1</button><button class="btn" id="controlsBtn">⚙ УПРАВЛЕНИЕ</button></div>
    </div>
   </section>
+
+   <section class="gameUI hidden" id="controlsScreen"><div class="panel" style="width:min(610px,96%)">
+    <h2>УПРАВЛЕНИЕ</h2>
+    <p class="rule">Нажми кнопку действия, а затем нужную клавишу. Настройки сохраняются только в этом браузере.</p>
+    <div class="keyGrid" id="keyGrid">
+     <div class="keyMap"><span>Двигаться влево</span><button class="btn" data-bind="left">A</button></div>
+     <div class="keyMap"><span>Двигаться вправо</span><button class="btn" data-bind="right">D</button></div>
+     <div class="keyMap"><span>Прыжок / бросок</span><button class="btn" data-bind="jumpShot">W</button></div>
+     <div class="keyMap"><span>Блок-шот</span><button class="btn" data-bind="block">Пробел</button></div>
+     <div class="keyMap"><span>Данк</span><button class="btn" data-bind="dunk">Q</button></div>
+     <div class="keyMap"><span>Рывок</span><button class="btn" data-bind="sprint">Shift</button></div>
+    </div>
+    <p id="keyStatus">Клавиши у каждого игрока можно настраивать независимо.</p>
+    <div class="actions"><button class="btn" id="resetControlsBtn">↺ СБРОСИТЬ</button><button class="btn primary" id="backControlsBtn">ГОТОВО</button></div>
+   </div></section>
   <section class="gameUI hidden" id="onlineScreen"><div class="panel"><h2>ОНЛАЙН 1 НА 1</h2>
     <p class="netStatus" id="onlineStatus">Создай комнату или введи код друга.</p>
     <div id="onlineControls">
-      <div class="netField"><label for="serverInput">Адрес общего сервера</label><input class="netInput" id="serverInput" type="text" spellcheck="false" autocomplete="off" placeholder="http://IP:3000 или https://адрес-сервера"></div>
+      <div class="netField"><label for="serverInput">Адрес общего сервера</label><input class="netInput" id="serverInput" type="text" spellcheck="false" autocomplete="off" placeholder="https://адрес-вебсокет-сервера"></div><p id="serverInfo"></p>
       <div class="netRow"><button class="btn primary" id="createRoomBtn">+ СОЗДАТЬ КОМНАТУ</button></div>
       <div class="netRow"><input class="netInput room" id="joinCode" placeholder="КОД" maxlength="6" spellcheck="false" autocomplete="off"><button class="btn" id="joinRoomBtn">ВОЙТИ ПО КОДУ</button></div>
     </div>
@@ -43,7 +69,7 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
   <section class="gameUI pausedOverlay hidden" id="pauseScreen"><div class="panel" id="pausePanel"><h2>ПАУЗА</h2><div class="actions"><button class="btn primary" id="resumeBtn">▶ ПРОДОЛЖИТЬ</button><button class="btn" id="menuFromPause">⌂ В МЕНЮ</button></div></div></section>
   <section class="gameUI hidden" id="endScreen"><div class="panel"><h2 class="winner" id="winnerText">ПОБЕДА!</h2><div class="scoreDetail" id="finalScore">5 : 2</div><div class="actions"><button class="btn primary" id="replayBtn">↻ РЕВАНШ</button><button class="btn" id="menuFromEnd">⌂ В МЕНЮ</button></div></div></section>
  </div>
- <div class="controlStrip" style="grid-template-columns:1fr"><div class="controlCard"><h3>УПРАВЛЕНИЕ</h3><p><span class="key">A</span> <span class="key">D</span> — движение &nbsp; <span class="key">ПРОБЕЛ</span> — блок &nbsp; <span class="key">W</span> — прыжок / бросок (держать и отпускать) &nbsp; <span class="key">Q</span> — данк &nbsp; <span class="key">Shift</span> — рывок</p></div></div>
+ <div class="controlStrip" style="grid-template-columns:1fr"><div class="controlCard"><h3>УПРАВЛЕНИЕ</h3><p id="controlSummary"></p></div></div>
  <div class="footer"><span>ESC — ПАУЗА (СОЛО)</span><button id="footerMute">♫ Звук включён</button></div>
 </main>
 <script>
@@ -51,10 +77,79 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
 const canvas=document.getElementById('game');let ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
 const W=480,H=270,FLOOR=225,GRAV=.26,WIN=5;
 const $=id=>document.getElementById(id);
-const ui={menu:$('menu'),online:$('onlineScreen'),pause:$('pauseScreen'),end:$('endScreen'),hud:$('hud'),btns:$('gameBtns'),toast:$('toast')};
+const ui={menu:$('menu'),controls:$('controlsScreen'),online:$('onlineScreen'),pause:$('pauseScreen'),end:$('endScreen'),hud:$('hud'),btns:$('gameBtns'),toast:$('toast')};
 let difficulty='normal',phase='menu',mute=false,clock=0,roundStart=0,flash=0,shake=0,slowFrames=0,toastTimer=0,frameLast=0,accum=0,aiNext=0,aiPlan='';
 let points=[0,0],players=[],ball={},particles=[],trails=[],waves=[],stars=[],crowd=[],keys={},glassFX=null,glassShards=[];
 let audio=null;
+// Per-browser key remapping. All network inputs are sent in CANONICAL codes so
+// the remote player's personal key choices never affect the host's controls.
+const KEY_STORAGE='neon-hoops-controls-v1';
+const DEFAULT_BINDS=Object.freeze({left:'KeyA',right:'KeyD',jumpShot:'KeyW',block:'Space',dunk:'KeyQ',sprint:'ShiftLeft'});
+const CANONICAL={left:'KeyA',right:'KeyD',jumpShot:'KeyW',block:'Space',dunk:'KeyQ',sprint:'ShiftLeft'};
+const ACTIONS=Object.keys(DEFAULT_BINDS);
+let keyBinds={...DEFAULT_BINDS},bindingAction=null;
+function validBinds(obj){
+ if(!obj||typeof obj!=='object')return false;
+ const codes=ACTIONS.map(a=>obj[a]);
+ return codes.every(v=>typeof v==='string'&&/^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Arrow(Left|Right|Up|Down)|Shift(Left|Right)|Control(Left|Right)|Alt(Left|Right)|Space|Enter|Backspace|Tab|CapsLock|Comma|Period|Slash|Semicolon|Quote|Bracket(Left|Right)|Backslash|Minus|Equal)$/.test(v))&&new Set(codes).size===codes.length;
+}
+try{const saved=JSON.parse(localStorage.getItem(KEY_STORAGE)||'null');if(validBinds(saved))keyBinds=saved;}catch{}
+function labelKey(code){
+ if(code==='Space')return 'ПРОБЕЛ';
+ if(code.startsWith('Key'))return code.substring(3);
+ if(code.startsWith('Digit'))return code.substring(5);
+ if(code.startsWith('Numpad'))return 'NUM '+code.substring(6);
+ if(code.startsWith('Shift'))return 'SHIFT'+(code==='ShiftRight'?' (П)':'');
+ if(code.startsWith('Control'))return 'CTRL';
+ if(code.startsWith('Alt'))return 'ALT';
+ if(code.startsWith('Arrow'))return {ArrowLeft:'←',ArrowRight:'→',ArrowUp:'↑',ArrowDown:'↓'}[code];
+ return code.toUpperCase().replace(/(LEFT|RIGHT)$/,'');
+}
+function actionFromPhysical(code){
+ for(const action of ACTIONS)if(keyBinds[action]===code)return action;
+ // Keep the original optional arrow and right Shift alternatives when unassigned.
+ if(code==='ArrowLeft'&&keyBinds.left==='KeyA')return 'left';
+ if(code==='ArrowRight'&&keyBinds.right==='KeyD')return 'right';
+ if(code==='ShiftRight'&&keyBinds.sprint==='ShiftLeft')return 'sprint';
+ return null;
+}
+function canonicalInput(code){const a=actionFromPhysical(code);return a?CANONICAL[a]:null;}
+function refreshKeyLabels(){
+ for(const b of document.querySelectorAll('[data-bind]')){
+  const a=b.dataset.bind;b.textContent=bindingAction===a?'НАЖМИ КЛАВИШУ…':labelKey(keyBinds[a]);
+  b.classList.toggle('listening',bindingAction===a);
+ }
+ $('controlSummary').textContent=`${labelKey(keyBinds.left)} / ${labelKey(keyBinds.right)} — движение · ${labelKey(keyBinds.jumpShot)} — прыжок / бросок · ${labelKey(keyBinds.block)} — блок · ${labelKey(keyBinds.dunk)} — данк · ${labelKey(keyBinds.sprint)} — рывок`;
+}
+function showControlMenu(){
+ if(net.active)return;
+ keys={};bindingAction=null;phase='settings';
+ ui.menu.classList.add('hidden');ui.controls.classList.remove('hidden');
+ $('keyStatus').textContent='Нажми на действие, затем на новую клавишу.';
+ refreshKeyLabels();
+}
+function closeControlMenu(){bindingAction=null;keys={};ui.controls.classList.add('hidden');ui.menu.classList.remove('hidden');phase='menu';refreshKeyLabels();}
+function changeBinding(action,code){
+ if(!bindingAction)return;
+ if(code==='Escape'){bindingAction=null;$('keyStatus').textContent='Выбор отменён.';refreshKeyLabels();return;}
+ if(code==='Unidentified'||['F5','F11','F12','Tab','MetaLeft','MetaRight','Escape'].includes(code)){
+  $('keyStatus').textContent='Эту клавишу нельзя назначить. Выбери другую.';return;
+ }
+ if(!/^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Arrow(Left|Right|Up|Down)|Shift(Left|Right)|Control(Left|Right)|Alt(Left|Right)|Space|Enter|Backspace|CapsLock|Comma|Period|Slash|Semicolon|Quote|Bracket(Left|Right)|Backslash|Minus|Equal)$/.test(code)){
+  $('keyStatus').textContent='Выбери обычную игровую клавишу.';return;
+ }
+ const taken=ACTIONS.find(a=>a!==action&&keyBinds[a]===code);
+ if(taken){$('keyStatus').textContent='Эта клавиша уже занята другим действием. Выбери другую.';return;}
+ keyBinds[action]=code;
+ try{localStorage.setItem(KEY_STORAGE,JSON.stringify(keyBinds));}catch{}
+ bindingAction=null;$('keyStatus').textContent='Сохранено. Настройки действуют и в одиночной, и в онлайн-игре.';refreshKeyLabels();
+}
+window.addEventListener('keydown',event=>{
+ if(!bindingAction)return;
+ event.preventDefault();event.stopImmediatePropagation();
+ if(event.repeat)return;
+ changeBinding(bindingAction,event.code);
+},true);
 // Online: authoritative host, lightweight snapshots, reconnection and ping display.
 const net={socket:null,role:null,active:false,code:'',token:'',serverUrl:'',lastSnapshotAt:0,lastPhase:'',lastSeq:-1,
  reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0,inputSeq:0,inputAck:0,inputRtt:0,lastLocalAction:0};
@@ -248,7 +343,14 @@ function showOnline(){
  closeOnline();phase='lobby';ui.menu.classList.add('hidden');ui.pause.classList.add('hidden');ui.end.classList.add('hidden');ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.online.classList.remove('hidden');
  $('onlineControls').classList.remove('hidden');$('inviteBox').classList.add('hidden');
  const saved=new URLSearchParams(window.location.search).get('room');if(saved)$('joinCode').value=saved.toUpperCase().slice(0,6);
- $('serverInput').value=(location.protocol==='http:'||location.protocol==='https:')?location.origin:'http://localhost:3000';
+ const q=new URLSearchParams(location.search),layero=location.hostname.endsWith('.layero.app');
+ let savedServer='';try{savedServer=localStorage.getItem('neon-hoops-server-v1')||'';}catch{}
+ const candidate=q.get('server')||savedServer;
+ let chosen=candidate;
+ if(layero&&candidate){try{if(new URL(candidate).hostname.endsWith('.layero.app'))chosen='';}catch{chosen='';}}
+ const preferred=chosen||(layero?'https://neon-hoops-online.onrender.com':((location.protocol==='http:'||location.protocol==='https:')?location.origin:'http://localhost:3000'));
+ $('serverInput').value=preferred;
+ $('serverInfo').textContent=layero?'Layero показывает сайт, но для комнат нужен WebSocket-сервер. По умолчанию используется Render; при необходимости укажи другой сервер.':'Оба игрока должны подключиться к одному WebSocket-серверу.';
  netText('Создай комнату или введи код друга.');keys={};
 }
 function onlineSocketUrl(){
@@ -259,9 +361,15 @@ function onlineSocketUrl(){
  url.pathname='/ws';url.search='';url.hash='';return url.toString();
 }
 function inviteLink(){
- const u=new URL($('serverInput').value.trim());
- if(u.protocol==='ws:')u.protocol='http:';if(u.protocol==='wss:')u.protocol='https:';
- u.pathname='/';u.search='?room='+encodeURIComponent(net.code);u.hash='';return u.toString();
+ // Share the same WEBSITE (Layero, Render or localhost) and carry backend in query.
+ // This avoids sending Layero visitors to Render's page when only Render hosts WS.
+ const page=(location.protocol==='http:'||location.protocol==='https:')?location.origin:$('serverInput').value.trim();
+ const u=new URL(page);if(u.protocol==='ws:')u.protocol='http:';if(u.protocol==='wss:')u.protocol='https:';
+ u.pathname='/';u.search='';u.searchParams.set('room',net.code);
+ const backend=$('serverInput').value.trim();const remote=new URL(backend);
+ if(remote.protocol==='ws:')remote.protocol='http:';if(remote.protocol==='wss:')remote.protocol='https:';
+ if(remote.origin!==u.origin)u.searchParams.set('server',remote.origin);
+ u.hash='';return u.toString();
 }
 function showMatchUI(){
  ui.menu.classList.add('hidden');ui.online.classList.add('hidden');ui.pause.classList.add('hidden');
@@ -308,7 +416,7 @@ function openNetSocket(mode,epoch){
   if(net.socket!==sock||epoch!==net.epoch)return;
   net.socket=null;unlock();
   if(net.token){scheduleReconnect();return}
-  revertToLobby('Не удалось подключиться. Проверь адрес сервера. ('+event.code+')');
+  revertToLobby(location.hostname.endsWith('.layero.app')&&new URL(net.serverUrl).hostname.endsWith('.layero.app')?'Layero не держит игровые WebSocket-комнаты. Укажи сервер Render в поле выше. (1006)':'Не удалось подключиться. Проверь адрес WebSocket-сервера. ('+event.code+')');
  };
  sock.onmessage=e=>{
   if(net.socket!==sock||epoch!==net.epoch)return;
@@ -375,6 +483,7 @@ function startOnlineConnect(type){
  const code=$('joinCode').value.trim().toUpperCase();
  if(type==='join'&&!/^[A-HJ-NP-Z2-9]{6}$/.test(code)){netText('Введите шестизначный код комнаты.');return}
  let url;try{url=onlineSocketUrl()}catch(e){netText('Неверный адрес: '+e.message);return}
+ try{localStorage.setItem('neon-hoops-server-v1',$('serverInput').value.trim());}catch{}
  closeOnline();net.epoch++;net.serverUrl=url;
  $('createRoomBtn').disabled=true;$('joinRoomBtn').disabled=true;
  netText('Подключение к серверу…');openNetSocket(type,net.epoch);
@@ -642,18 +751,21 @@ function controls(code){
  return null;
 }
 window.addEventListener('keydown',e=>{
- if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','ShiftLeft','ShiftRight'].includes(e.code))e.preventDefault();
- if(e.code==='Escape'){if(phase==='playing'||phase==='paused')setPause();return}
- if(phase!=='playing'||keys[e.code])return;
- const action=controls(e.code);if(!action)return;
- keys[e.code]=true;
- if(net.role==='guest'&&net.active){notifyInput(e.code,true);return;}
+ if(e.code==='Escape'){if(phase==='playing'||phase==='paused')setPause();return;}
+ if(phase!=='playing')return;
+ const canon=canonicalInput(e.code);if(!canon)return;
+ if(['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','ShiftLeft','ShiftRight','Tab'].includes(e.code))e.preventDefault();
+ if(keys[canon])return;
+ const action=controls(canon);if(!action)return;
+ keys[canon]=true;
+ if(net.role==='guest'&&net.active){notifyInput(canon,true);return;}
  doAction(players[0],action);
 });
 window.addEventListener('keyup',e=>{
- if(net.role==='guest'&&net.active&&keys[e.code])notifyInput(e.code,false);
- else if(e.code==='KeyW'&&phase==='playing')releaseCharge(players[0]);
- delete keys[e.code];
+ const canon=canonicalInput(e.code);if(!canon)return;
+ if(net.role==='guest'&&net.active&&keys[canon])notifyInput(canon,false);
+ else if(canon==='KeyW'&&phase==='playing'&&keys[canon])releaseCharge(players[0]);
+ delete keys[canon];
 });
 window.addEventListener('blur',()=>{
  if(net.role==='guest'&&net.active)for(const code of Object.keys(keys))if(controls(code))notifyInput(code,false);
@@ -1137,6 +1249,11 @@ function loop(now){
 }
 for(const btn of document.querySelectorAll('[data-diff]'))btn.addEventListener('click',()=>{difficulty=btn.dataset.diff;document.querySelectorAll('[data-diff]').forEach(b=>b.classList.toggle('selected',b===btn));snd('click')});
 $('startBtn').onclick=()=>{closeOnline();start();};
+$('controlsBtn').onclick=showControlMenu;
+$('backControlsBtn').onclick=closeControlMenu;
+$('resetControlsBtn').onclick=()=>{keyBinds={...DEFAULT_BINDS};bindingAction=null;try{localStorage.removeItem(KEY_STORAGE);}catch{};$('keyStatus').textContent='Стандартное управление восстановлено.';refreshKeyLabels();};
+for(const b of document.querySelectorAll('[data-bind]'))b.addEventListener('click',()=>{b.blur();bindingAction=b.dataset.bind;$('keyStatus').textContent='Нажми желаемую клавишу. Esc — отмена.';refreshKeyLabels();});
+refreshKeyLabels();
 $('onlineBtn').onclick=showOnline;
 $('createRoomBtn').onclick=()=>startOnlineConnect('create');
 $('joinRoomBtn').onclick=()=>startOnlineConnect('join');
