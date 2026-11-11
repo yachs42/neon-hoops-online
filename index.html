@@ -57,8 +57,99 @@ let points=[0,0],players=[],ball={},particles=[],trails=[],waves=[],stars=[],cro
 let audio=null;
 // Online: authoritative host, lightweight snapshots, reconnection and ping display.
 const net={socket:null,role:null,active:false,code:'',token:'',serverUrl:'',lastSnapshotAt:0,lastPhase:'',lastSeq:-1,
- reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0};
+ reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0,inputSeq:0,inputAck:0,inputRtt:0,lastLocalAction:0};
 let remoteKeys={},smoothPlayers=[],smoothBall=null;
+// Guest predicts ONLY their own appearance. Host still decides scores, steals and hits.
+let guestPred=null,guestPredTime=0;
+const inputTimes=new Map();const localSoundAt=new Map();
+function resetPrediction(){guestPred=null;guestPredTime=0;inputTimes.clear();net.inputSeq=0;net.inputAck=0;net.inputRtt=0;net.lastLocalAction=0;localSoundAt.clear();}
+function notifyInput(code,down){
+  const seq=++net.inputSeq;
+  inputTimes.set(seq,performance.now());
+  // Keep memory bounded if a VPN path is temporarily stalled.
+  if(inputTimes.size>120)inputTimes.delete(inputTimes.keys().next().value);
+  net.lastLocalAction=performance.now();
+  netSend({type:'input',code,down,seq});
+  if(phase==='playing'&&!net.suspended&&guestPred)predictAction(code,down);
+}
+function moveDirection(){return ((keys.KeyD||keys.ArrowRight)?1:0)-((keys.KeyA||keys.ArrowLeft)?1:0);}
+function predictAction(code,down){
+ const p=guestPred;if(!p||p.stun>0||p.dunk||clock-roundStart<32||!down&&code!=='Space')return;
+ if(!down){if(code==='Space'&&p.charging){p.charging=false;p.shotPose=20;p.charge=0;}return;}
+ if(code==='Space'){
+  if(ball.owner===1){if(!p.charging&&!p.shootCooldown){p.charging=true;p.charge=0;}}
+  if(p.ground){p.vy=-5.75;p.ground=false;snd('jump');localSoundAt.set('jump',performance.now());}
+ }else if(code==='KeyW'&&p.blockCooldown<=0){p.block=36;p.blockCooldown=55;snd('block');localSoundAt.set('block',performance.now());}
+ else if((code==='ShiftLeft'||code==='ShiftRight')&&p.cool<=0){
+  const dir=moveDirection()||p.facing||-1;
+  p.dash=11;p.cool=65;p.vx=dir*(ball.owner===1?5.2:6);p.facing=dir;snd('dash');localSoundAt.set('dash',performance.now());
+ }else if(code==='KeyQ'&&ball.owner===1&&p.dunkCooldown<=0){
+  const rim=hoop(0),distance=Math.abs(rim.x-p.x),forward=(rim.x-p.x)*-1;
+  const momentum=clamp(Math.abs(p.vx)/2.65,0,1),reach=66+momentum*28;
+  if(forward>16&&distance<=reach){
+   const duration=Math.round(clamp(33+distance/3.8-momentum*5,35,58));
+   p.dunk={startX:p.x,startY:p.y,targetX:rim.x+18,targetY:rim.y+12,duration,progress:0,variant:'hang'};
+   p.charging=false;p.charge=0;
+  }
+ }
+}
+function tickPrediction(){
+ const p=guestPred;if(!p||phase!=='playing'||net.suspended)return;
+ p.anim++;p.cool=Math.max(0,(p.cool||0)-1);p.stun=Math.max(0,(p.stun||0)-1);
+ p.block=Math.max(0,(p.block||0)-1);p.blockCooldown=Math.max(0,(p.blockCooldown||0)-1);
+ p.dunkCooldown=Math.max(0,(p.dunkCooldown||0)-1);p.shootCooldown=Math.max(0,(p.shootCooldown||0)-1);
+ p.shotPose=Math.max(0,(p.shotPose||0)-1);
+ if(p.charging){p.charge=Math.min(68,(p.charge||0)+1);if(p.charge>=68){p.charging=false;p.shotPose=20;}}
+ if(p.dunk){
+  const d=p.dunk;d.progress++;const t=clamp(d.progress/d.duration,0,1),u=clamp((t-.13)/.87,0,1),glide=u*u*(3-2*u);
+  p.x=d.startX+(d.targetX-d.startX)*glide;
+  p.y=t<.13?d.startY+Math.sin(t/.13*Math.PI)*3:d.startY+(d.targetY-d.startY)*Math.sin(glide*Math.PI*.5)-Math.sin(u*Math.PI)*21;
+  p.vx=0;p.vy=0;p.ground=false;
+  if(t>=1){p.dunk=null;p.vy=2.3;p.dunkCooldown=45;}
+  return;
+ }
+ const dir=p.stun>0?0:moveDirection();
+ if(p.dash>0){p.dash--;p.vx*=.965;}
+ else{
+  const carrying=ball.owner===1;
+  const pressure=carrying&&Math.abs(players[0]?.x-p.x)<32;
+  const mul=carrying?(pressure?.81:.88):1.04;
+  const accel=(p.ground?.34:.20)*mul,maximum=(p.ground?2.65:2.38)*mul;
+  if(dir){p.vx=clamp(p.vx+dir*accel,-maximum,maximum);p.facing=dir;p.run+=(Math.abs(p.vx)*.3);}
+  else{p.vx*=p.ground?.76:.94;if(Math.abs(p.vx)<.055)p.vx=0;}
+ }
+ p.vy+=GRAV*1.2;p.x+=p.vx;p.y+=p.vy;
+ if(p.y+p.h>=FLOOR){p.y=FLOOR-p.h;p.vy=0;p.ground=true;}else p.ground=false;
+ p.x=clamp(p.x,19,W-19);
+}
+function reconcileGuest(p,ack){
+ if(!p)return;
+ // The round boundary must snap immediately to authoritative starting positions.
+ if(!guestPred||Math.abs(guestPred.x-p.x)>165||phase!=='playing'){
+  guestPred={...p,ghosts:p.ghosts||[]};guestPredTime=performance.now();return;
+ }
+ const now=performance.now();
+ if(Number.isSafeInteger(ack)&&ack>net.inputAck){
+  for(const [seq,ts] of inputTimes){
+   if(seq<=ack){const sample=now-ts;net.inputRtt=net.inputRtt?net.inputRtt*.85+sample*.15:sample;inputTimes.delete(seq);}
+  }
+  net.inputAck=ack;netVisibility();
+ }
+ // During an unacknowledged move, old server positions are intentionally not
+ // allowed to pull the local player backwards (the core VPN latency fix).
+ const moving=!!moveDirection(),waiting=inputTimes.size>0;
+ const error=p.x-guestPred.x;
+ const correcting=waiting?.005:moving?.013:.065;
+ guestPred.x=clamp(guestPred.x+clamp(error,-70,70)*correcting,19,W-19);
+ if(!moving&&!waiting&&Math.abs(error)>75)guestPred.x+=clamp(error,-3.2,3.2);
+ if(!waiting&&!moving&&!guestPred.dunk){guestPred.y+=(p.y-guestPred.y)*.12;guestPred.ground=p.ground;}
+ if(!waiting){
+  // Finished remote actions can correct local cosmetic predictions without teleporting.
+  if(!p.dunk&&guestPred.dunk&&Math.abs(p.x-guestPred.x)<24)guestPred.dunk=null;
+  if(!guestPred.charging){guestPred.block=Math.max(guestPred.block||0,p.block||0);}
+ }
+}
+
 function netSend(msg){
  const sock=net.socket;
  if(!sock||sock.readyState!==WebSocket.OPEN)return false;
@@ -73,8 +164,9 @@ function netVisibility(){
  $('roomHud').classList.toggle('hidden',!active);
  $('connectionAlert').classList.toggle('hidden',!active||!net.suspended);
  if(active){
-  const info=net.rtt?' · '+Math.round(net.rtt)+' ms':'';
-  $('roomHud').textContent='ОНЛАЙН · '+net.code+' · '+(net.role==='host'?'P1':'P2')+info;
+  const info=net.rtt?' · СЕРВЕР '+Math.round(net.rtt)+' мс':'';
+  const inputInfo=net.role==='guest'&&net.inputRtt?' · КОМАНДЫ '+Math.round(net.inputRtt)+' мс':'';
+  $('roomHud').textContent='ОНЛАЙН · '+net.code+' · '+(net.role==='host'?'P1':'P2')+info+inputInfo;
  }
 }
 function closeOnline(){
@@ -87,7 +179,7 @@ function closeOnline(){
  }
  net.socket=null;net.active=false;net.role=null;net.code='';net.token='';net.serverUrl='';net.suspended=false;
  net.reconnectDeadline=0;net.reconnectAttempts=0;net.rtt=0;net.lastSeq=-1;
- remoteKeys={};smoothPlayers=[];smoothBall=null;netVisibility();
+ remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();netVisibility();
 }
 function showOnline(){
  closeOnline();phase='lobby';ui.menu.classList.add('hidden');ui.pause.classList.add('hidden');ui.end.classList.add('hidden');ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.online.classList.remove('hidden');
@@ -115,14 +207,14 @@ function showMatchUI(){
 function revertToLobby(message){
  clearTimeout(net.reconnectTimer);net.reconnectTimer=null;
  net.role=null;net.active=false;net.token='';net.code='';net.suspended=false;net.reconnectDeadline=0;
- remoteKeys={};smoothPlayers=[];smoothBall=null;
+ remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();
  phase='lobby';ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.end.classList.add('hidden');
  ui.online.classList.remove('hidden');$('onlineControls').classList.remove('hidden');$('inviteBox').classList.add('hidden');
  netVisibility();netText(message||'Соединение закрыто. Создай комнату или войди по коду.');
 }
 function replayHeldKeys(){
  if(net.role!=='guest')return;
- for(const code of Object.keys(keys))if(controls(code))netSend({type:'input',code,down:true});
+ for(const code of Object.keys(keys))if(controls(code))notifyInput(code,true);
 }
 function scheduleReconnect(){
  if(!net.token||!net.code||!net.serverUrl)return revertToLobby('Связь с сервером потеряна. Попробуй подключиться снова.');
@@ -172,8 +264,8 @@ function openNetSocket(mode,epoch){
   }
   else if(msg.type==='start'){
    net.active=true;net.suspended=false;net.reconnectDeadline=0;net.reconnectAttempts=0;
-   net.lastSnapshotAt=0;net.lastPhase='';net.lastSeq=-1;
-   remoteKeys={};smoothPlayers=[];smoothBall=null;
+   net.lastSnapshotAt=0;net.lastPhase='';net.lastSeq=-1;net.lastRemoteInputSeq=0;
+   remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();
    $('replayBtn').disabled=false;$('replayBtn').textContent='↻ РЕВАНШ';
    start();netVisibility();
   }
@@ -226,6 +318,7 @@ function startOnlineConnect(type){
 }
 function remoteInput(msg){
  const action=controls(msg.code);if(!action)return;
+ if(Number.isSafeInteger(msg.seq)&&msg.seq>0)net.lastRemoteInputSeq=Math.max(net.lastRemoteInputSeq||0,msg.seq);
  const was=!!remoteKeys[msg.code];
  if(msg.down){remoteKeys[msg.code]=true;if(!was)doAction(players[1],action)}
  else{delete remoteKeys[msg.code];if(msg.code==='Space')releaseCharge(players[1])}
@@ -236,7 +329,9 @@ function loadSnapshot(s){
  if(Number.isFinite(s.seq))net.lastSeq=s.seq;
  const was=phase;
  phase=s.phase;clock=s.clock;roundStart=s.roundStart;points=s.points;
- players=s.players;ball=s.ball;particles=s.particles||[];trails=s.trails||[];waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
+ players=s.players;ball=s.ball;
+ if(net.role==='guest')reconcileGuest(s.players[1],s.inputAck);
+ if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};particles=s.particles||[];trails=s.trails||[];waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
  if(!smoothPlayers.length)smoothPlayers=players.map(p=>({x:p.x,y:p.y}));
  if(!smoothBall)smoothBall={x:ball.x,y:ball.y};
  if(Math.abs(ball.x-smoothBall.x)>65||Math.abs(ball.y-smoothBall.y)>75){smoothBall.x=ball.x;smoothBall.y=ball.y}
@@ -251,10 +346,10 @@ function publishSnapshot(force=false){
  if(!force&&!changed&&now-net.lastSnapshotAt<50)return; // 20 Hz, no bursts on catch-up.
  if(!force&&!changed&&phase!=='playing'&&phase!=='goal')return;
  if(net.socket.bufferedAmount>28*1024)return; // drop stale frames instead of queuing delay.
- const state={seq:Math.floor(now),phase,clock,roundStart,points,
-  players:players.map(p=>({...p,ghosts:p.ghosts.slice(-6)})),ball,
-  particles:particles.slice(-36),trails:trails.slice(-15),waves:waves.slice(-8),glassFX,
-  glassShards:glassShards.slice(-30),flash,shake,toastTimer,toast:ui.toast.textContent};
+ const state={seq:Math.floor(now),inputAck:net.lastRemoteInputSeq||0,phase,clock,roundStart,points,
+  players:players.map(p=>({...p,ghosts:p.ghosts.slice(-3)})),ball,
+  particles:particles.slice(-12),trails:trails.slice(-9),waves:waves.slice(-4),glassFX,
+  glassShards:glassShards.slice(-16),flash,shake,toastTimer,toast:ui.toast.textContent};
  if(netSend({type:'snapshot',state})){net.lastSnapshotAt=now;net.lastPhase=phase;}
 }
 function doAction(p,action){
@@ -484,16 +579,16 @@ window.addEventListener('keydown',e=>{
  if(phase!=='playing'||keys[e.code])return;
  const action=controls(e.code);if(!action)return;
  keys[e.code]=true;
- if(net.role==='guest'&&net.active){netSend({type:'input',code:e.code,down:true});return;}
+ if(net.role==='guest'&&net.active){notifyInput(e.code,true);return;}
  doAction(players[0],action);
 });
 window.addEventListener('keyup',e=>{
- if(net.role==='guest'&&net.active&&keys[e.code])netSend({type:'input',code:e.code,down:false});
+ if(net.role==='guest'&&net.active&&keys[e.code])notifyInput(e.code,false);
  else if(e.code==='Space'&&phase==='playing')releaseCharge(players[0]);
  delete keys[e.code];
 });
 window.addEventListener('blur',()=>{
- if(net.role==='guest'&&net.active)for(const code of Object.keys(keys))if(controls(code))netSend({type:'input',code,down:false});
+ if(net.role==='guest'&&net.active)for(const code of Object.keys(keys))if(controls(code))notifyInput(code,false);
  if(net.role==='host'&&net.active&&players[0]?.charging)releaseCharge(players[0]);
  keys={};if(phase==='playing'&&!net.active)setPause();
 });
@@ -931,7 +1026,7 @@ function drawPlayer(p){
 function drawBall(){for(const t of trails)rect(t.x-2,t.y-2,4,4,`rgba(255,199,111,${t.t/34})`);const x=ball.x,y=ball.y;ctx.fillStyle='#ef8e45';ctx.beginPath();ctx.arc(Math.round(x),Math.round(y),ball.r,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#7b443b';ctx.lineWidth=1;ctx.stroke();rect(x-1,y-4,2,8,'#8b4a35');rect(x-4,y-1,8,2,'#8b4a35');rect(x-3,y-4,2,2,'#ffd1a5')}
 
 function drawShotMeter(){
- const p=players[0];if(!p||!p.charging||phase!=='playing')return;
+ const p=net.role==='guest'&&net.active?players[1]:players[0];if(!p||!p.charging||phase!=='playing')return;
  const x=343,y=49,w=16,h=79,progress=clamp(p.charge/52,0,1),over=p.charge>52;
  rect(x-5,y-6,w+10,h+15,'#071329');rect(x-2,y-2,w+4,h+4,'#e5ecff');
  rect(x,y,w,h,'#263855');rect(x,y,w,Math.round(h*.18),'#4ddc79');
@@ -948,24 +1043,19 @@ function loop(now){
  if(!frameLast)frameLast=now;
  let elapsed=Math.min(90,now-frameLast);frameLast=now;
  if(net.role==='guest'&&net.active){
-  // Smooth state; locally predict the guest's movement while waiting for the host.
+  // Predict the guest's own movement immediately even when the VPN path takes
+  // hundreds of milliseconds. All goals/hits still come from the host.
+  accum+=elapsed;let steps=0;
+  while(accum>=1000/60&&steps<5){tickPrediction();accum-=1000/60;steps++;}
   if(players.length&&smoothPlayers.length===players.length){
-   const original=players,originalBall=ball;
-   for(let i=0;i<players.length;i++){
-    const dst=players[i],d=smoothPlayers[i];
-    let targetX=dst.x,targetY=dst.y;
-    if(i===1&&phase==='playing'&&!net.suspended&&!dst.dunk&&dst.stun<=0){
-     const dir=((keys.KeyD||keys.ArrowRight)?1:0)-((keys.KeyA||keys.ArrowLeft)?1:0);
-     const ahead=Math.min(5,Math.max(1.5,(net.rtt/2+48)/16.67));
-     targetX=dst.x+dst.vx*ahead+dir*ahead*.75;
-     targetX=clamp(targetX,dst.x-19,dst.x+19);
-    }
-    d.x+=clamp(targetX-d.x,-7,7)*.72;
-    d.y+=(targetY-d.y)*.68;
-   }
-   smoothBall.x+=(ball.x-smoothBall.x)*.7;smoothBall.y+=(ball.y-smoothBall.y)*.7;
-   players=players.map((p,i)=>({...p,x:smoothPlayers[i].x,y:smoothPlayers[i].y}));
-   ball={...ball,x:smoothBall.x,y:smoothBall.y};draw();players=original;ball=originalBall;
+   const authoritativePlayers=players,authoritativeBall=ball;
+   const other=smoothPlayers[0],auth=players[0];
+   other.x+=(auth.x-other.x)*.65;other.y+=(auth.y-other.y)*.65;
+   smoothBall.x+=(ball.x-smoothBall.x)*.65;smoothBall.y+=(ball.y-smoothBall.y)*.65;
+   players=[{...auth,x:other.x,y:other.y},guestPred?{...players[1],...guestPred}:players[1]];
+   ball={...ball,x:smoothBall.x,y:smoothBall.y};
+   if(ball.owner===1&&guestPred){ball.x=guestPred.x+guestPred.facing*8;ball.y=guestPred.y-6;}
+   draw();players=authoritativePlayers;ball=authoritativeBall;
   }else draw();
  }else{
   if(net.active&&net.suspended){accum=0;}

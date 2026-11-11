@@ -111,7 +111,9 @@ function handleMessage(peer,raw){
  if(msg.type==='leave'){detachPeer(peer,true);try{peer.socket.end()}catch{};return}
  if(msg.type==='input'&&peer===room.slots[1]&&SAFE_INPUTS.has(msg.code)&&typeof msg.down==='boolean'){
   // INPUTS: forward immediately, never behind a state queue.
-  return send(room.slots[0],{type:'input',code:msg.code,down:msg.down});
+  // Sequence number returns in host snapshots to measure end-to-end command delay.
+  const seq=Number.isSafeInteger(msg.seq)&&msg.seq>0?msg.seq:0;
+  return send(room.slots[0],{type:'input',code:msg.code,down:msg.down,seq});
  }
  if(msg.type==='snapshot'&&peer===room.slots[0]&&room.slots[1]&&msg.state&&typeof msg.state==='object'){
   // Forward original JSON bytes without serializing them again. Old state frames may be dropped.
