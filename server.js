@@ -1,5 +1,5 @@
 'use strict';
-// NEON HOOPS: low-latency room server with temporary disconnect recovery.
+// NEON HOOPS v7.8: low-latency WebSocket relay with recovery and stale-frame shedding.
 // The host browser owns game physics. This service relays inputs and small snapshots.
 const http = require('node:http');
 const fs = require('node:fs');
@@ -14,7 +14,7 @@ const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 15000;
 const PEER_TIMEOUT_MS = Number(process.env.PEER_TIMEOUT_MS) || 50000;
 const MAX_PAYLOAD = 150 * 1024;
 const MAX_BUFFER = 350 * 1024;
-const MAX_SNAPSHOT_BACKLOG = 48 * 1024;
+const MAX_SNAPSHOT_BACKLOG = 12 * 1024;
 const rooms = new Map();
 const peers = new Set();
 const SAFE_INPUTS = new Set(['Space','KeyA','KeyD','ArrowLeft','ArrowRight','ShiftLeft','ShiftRight','KeyQ','KeyW']);

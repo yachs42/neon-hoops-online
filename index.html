@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEON HOOPS 7.7 — RENDER RESTORED</title>
+<title>NEON HOOPS 7.8 — LOW LATENCY</title>
 <style>
 :root{color-scheme:dark;--ink:#e9faff;--muted:#8eabc4;--pink:#ff568a;--cyan:#42e9f5;--bg:#080e21}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#202950 0,#0a1024 58%,#060a16 100%);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace;display:flex;align-items:center;justify-content:center;padding:18px;overflow-x:hidden}
@@ -28,7 +28,7 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
 </head>
 <body>
 <main class="shell">
- <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.7 · RENDER</div></header>
+ <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.8 · FAST RENDER</div></header>
  <div class="frame" id="frame">
   <canvas id="game" width="480" height="270" aria-label="Пиксельный баскетбол"></canvas>
   <div class="hud hidden" id="hud"><div class="score"><span class="num left" id="scoreL">0</span><div class="versus"><strong>VS</strong>ДО 5 ОЧКОВ</div><span class="num right" id="scoreR">0</span></div></div>
@@ -152,11 +152,12 @@ window.addEventListener('keydown',event=>{
 },true);
 // Online: authoritative host, lightweight snapshots, reconnection and ping display.
 const net={socket:null,role:null,active:false,code:'',token:'',serverUrl:'',lastSnapshotAt:0,lastPhase:'',lastSeq:-1,
- reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0,inputSeq:0,inputAck:0,inputRtt:0,lastLocalAction:0};
+ reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0,inputSeq:0,inputAck:0,inputRtt:0,lastLocalAction:0,fastSnapshot:false,lastFxAt:0};
 let remoteKeys={};
 // Snapshot timeline: smooth other players and the ball independently of packet arrival.
 // Keep guest's own low-latency local prediction unchanged.
-const SMOOTH_DELAY_MS=54, SNAPSHOT_PERIOD_MS=34;
+// 60 Hz when the host renders at 60 FPS, with a smaller jitter buffer.
+const SMOOTH_DELAY_MS=24, SNAPSHOT_PERIOD_MS=15, COSMETIC_PERIOD_MS=75;
 let visualHistory=[],visualOffset=NaN,visualJitter=0,visualLastArrival=0,visualPhase='';
 let renderFps=0,fpsSamples=0,fpsLastUpdate=0;
 let backgroundCache=null,guestTrails=[];
@@ -221,7 +222,7 @@ function sampleVisual(now){
  const history=visualHistory;
  if(history.length===1)return {p:history[0].p,b:history[0].b};
  // A modest adaptive jitter buffer avoids packet-to-packet jumps under VPN.
- const target=now-visualOffset-SMOOTH_DELAY_MS-Math.min(38,visualJitter*.9);
+ const target=now-visualOffset-SMOOTH_DELAY_MS-Math.min(30,visualJitter*.7);
  let a=history[0],b=history[1],factor=0;
  if(target<=a.t)return {p:a.p,b:a.b};
  for(let i=1;i<history.length;i++){
@@ -229,7 +230,7 @@ function sampleVisual(now){
    if(target<=b.t){factor=Math.max(0,Math.min(1,(target-a.t)/Math.max(1,b.t-a.t)));break;}
    if(i===history.length-1){
      // Very short bounded extrapolation hides single late/lost snapshots.
-     factor=1+Math.min(48,Math.max(0,target-b.t))/Math.max(1,b.t-a.t);
+     factor=1+Math.min(35,Math.max(0,target-b.t))/Math.max(1,b.t-a.t);
    }
  }
  const pose={...b.p};
@@ -371,7 +372,7 @@ function closeOnline(){
   try{sock.close()}catch{}
  }
  net.socket=null;net.active=false;net.role=null;net.code='';net.token='';net.serverUrl='';net.suspended=false;
- net.reconnectDeadline=0;net.reconnectAttempts=0;net.rtt=0;net.lastSeq=-1;
+ net.reconnectDeadline=0;net.reconnectAttempts=0;net.rtt=0;net.lastSeq=-1;net.fastSnapshot=false;net.lastFxAt=0;
  remoteKeys={};clearVisualHistory();resetPrediction();netVisibility();
 }
 function showOnline(){
@@ -462,7 +463,7 @@ function openNetSocket(mode,epoch){
   }
   else if(msg.type==='start'){
    net.active=true;net.suspended=false;net.reconnectDeadline=0;net.reconnectAttempts=0;
-   net.lastSnapshotAt=0;net.lastPhase='';net.lastSeq=-1;net.lastRemoteInputSeq=0;
+   net.lastSnapshotAt=0;net.lastFxAt=0;net.fastSnapshot=false;net.lastPhase='';net.lastSeq=-1;net.lastRemoteInputSeq=0;
    remoteKeys={};clearVisualHistory();resetPrediction();
    $('replayBtn').disabled=false;$('replayBtn').textContent='↻ РЕВАНШ';
    start();netVisibility();
@@ -521,6 +522,9 @@ function remoteInput(msg){
  const was=!!remoteKeys[msg.code];
  if(msg.down){remoteKeys[msg.code]=true;if(!was)doAction(players[1],action)}
  else{delete remoteKeys[msg.code];if(msg.code==='KeyW')releaseCharge(players[1])}
+ // A new remote command should be acknowledged in the NEXT host physics frame.
+ // Do not wait for the regular network snapshot interval.
+ net.fastSnapshot=true;
 }
 function loadSnapshot(s){
  if(!Array.isArray(s.players)||!s.ball||!Array.isArray(s.points))return;
@@ -530,23 +534,34 @@ function loadSnapshot(s){
  phase=s.phase;clock=s.clock;roundStart=s.roundStart;points=s.points;
  players=s.players;ball=s.ball;
  if(net.role==='guest'){storeVisualSnapshot(s);reconcileGuest(s.players[1],s.inputAck);}
- if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};particles=s.particles||[];trails=net.role==='guest'?[]:(s.trails||[]);waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
+ if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};
+ // Physics arrives at up to 60 Hz, visual effects less often to save bandwidth.
+ // Keep animating previous FX between those updates instead of clearing them.
+ if(s.fx){particles=s.fx.particles||[];waves=s.fx.waves||[];glassFX=s.fx.glassFX||null;glassShards=s.fx.glassShards||[];}
+ trails=net.role==='guest'?[]:(s.trails||[]);flash=s.flash||0;shake=s.shake||0;
  $('scoreL').textContent=points[0];$('scoreR').textContent=points[1];
  if(s.toastTimer>0){ui.toast.textContent=s.toast;ui.toast.classList.remove('hidden')}else ui.toast.classList.add('hidden');
  if(phase==='ended'&&was!=='ended')showEndUI();
  else if(phase!=='ended')ui.end.classList.add('hidden');
 }
 function publishSnapshot(force=false){
- if(net.role!=='host'||!net.active||net.socket?.readyState!==WebSocket.OPEN)return;
+ if(net.role!=='host'||!net.active||net.socket?.readyState!==WebSocket.OPEN)return false;
  const now=performance.now(),changed=net.lastPhase!==phase;
- if(!force&&!changed&&now-net.lastSnapshotAt<SNAPSHOT_PERIOD_MS)return; // ~30 Hz, no catch-up bursts.
- if(!force&&!changed&&phase!=='playing'&&phase!=='goal')return;
- if(net.socket.bufferedAmount>28*1024)return; // drop stale frames instead of queuing delay.
+ if(!force&&!changed&&now-net.lastSnapshotAt<SNAPSHOT_PERIOD_MS)return false;
+ if(!force&&!changed&&phase!=='playing'&&phase!=='goal')return false;
+ // Prefer fresh game state over building a backlog of obsolete positions.
+ if(net.socket.bufferedAmount>12*1024)return false;
  const state={seq:Math.floor(now),inputAck:net.lastRemoteInputSeq||0,phase,clock,roundStart,points,
   players:players.map(p=>({...p,ghosts:p.ghosts.slice(-3)})),ball,
-  particles:particles.slice(-12),waves:waves.slice(-4),glassFX,
-  glassShards:glassShards.slice(-16),flash,shake,toastTimer,toast:ui.toast.textContent};
- if(netSend({type:'snapshot',state})){net.lastSnapshotAt=now;net.lastPhase=phase;}
+  flash,shake,toastTimer,toast:ui.toast.textContent};
+ const fxDue=force||changed||!net.lastFxAt||now-net.lastFxAt>=COSMETIC_PERIOD_MS;
+ if(fxDue)state.fx={particles:particles.slice(-12),waves:waves.slice(-4),glassFX,glassShards:glassShards.slice(-16)};
+ if(netSend({type:'snapshot',state})){
+  net.lastSnapshotAt=now;net.lastPhase=phase;
+  if(fxDue)net.lastFxAt=now;
+  return true;
+ }
+ return false;
 }
 function doAction(p,action){
  if(action==='jumpShot'){if(ball.owner===p.team)beginCharge(p);else jumpOnly(p);}
@@ -1238,7 +1253,7 @@ function draw(){ctx.save();ctx.clearRect(0,0,W,H);if(shake>0)ctx.translate(rand(
 function loop(now){
  fpsSamples++;if(!fpsLastUpdate)fpsLastUpdate=now;
  if(now-fpsLastUpdate>=1000){renderFps=Math.round(fpsSamples*1000/(now-fpsLastUpdate));fpsSamples=0;fpsLastUpdate=now;if(net.role==='guest'&&net.active)netVisibility();}
- if(net.socket?.readyState===WebSocket.OPEN&&now-net.pingAt>2800){net.pingAt=now;netSend({type:'ping',t:Date.now()})}
+ if(net.socket?.readyState===WebSocket.OPEN&&now-net.pingAt>1700){net.pingAt=now;netSend({type:'ping',t:Date.now()})}
  if(!frameLast)frameLast=now;
  let elapsed=Math.min(90,now-frameLast);frameLast=now;
  if(net.role==='guest'&&net.active){
@@ -1246,6 +1261,11 @@ function loop(now){
   // hundreds of milliseconds. All goals/hits still come from the host.
   accum+=elapsed;let steps=0;
   while(accum>=1000/60&&steps<5){tickPrediction();accum-=1000/60;steps++;}
+  // FX animate at the local render rate, not only when the server sends FX.
+  for(const q of particles){q.x+=q.vx*.85;q.y+=q.vy*.85;q.vy+=.12;q.life--;}
+  particles=particles.filter(q=>q.life>0);
+  for(const a of waves)a.life--;waves=waves.filter(a=>a.life>0);
+  animateGlass();
   if(players.length){
    const authoritativePlayers=players,authoritativeBall=ball,authoritativeTrails=trails;
    const visual=sampleVisual(now);
@@ -1264,7 +1284,9 @@ function loop(now){
    accum+=elapsed;let steps=0;
    while(accum>=1000/60&&steps<5){update();accum-=1000/60;steps++}
   }else{clock+=.2;for(const q of particles){q.y+=q.vy*.2;q.life-=.2}particles=particles.filter(q=>q.life>0)}
-  publishSnapshot();draw();
+  const urgent=net.fastSnapshot;
+  if(publishSnapshot(urgent))net.fastSnapshot=false;
+  draw();
  }
  requestAnimationFrame(loop);
 }
