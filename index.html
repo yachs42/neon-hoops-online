@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEON HOOPS 7.2 — VPN FIX</title>
+<title>NEON HOOPS 7.3 — SMOOTH PLAY</title>
 <style>
 :root{color-scheme:dark;--ink:#e9faff;--muted:#8eabc4;--pink:#ff568a;--cyan:#42e9f5;--bg:#080e21}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#202950 0,#0a1024 58%,#060a16 100%);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace;display:flex;align-items:center;justify-content:center;padding:18px;overflow-x:hidden}
@@ -17,7 +17,7 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
 </head>
 <body>
 <main class="shell">
- <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.2</div></header>
+ <header class="brandbar"><div><b>★</b> ARCADE / NEON HOOPS</div><div class="right"><span class="dot"></span> SOLO / ONLINE · v7.3</div></header>
  <div class="frame" id="frame">
   <canvas id="game" width="480" height="270" aria-label="Пиксельный баскетбол"></canvas>
   <div class="hud hidden" id="hud"><div class="score"><span class="num left" id="scoreL">0</span><div class="versus"><strong>VS</strong>ДО 5 ОЧКОВ</div><span class="num right" id="scoreR">0</span></div></div>
@@ -43,12 +43,12 @@ canvas{width:100%;height:100%;image-rendering:pixelated;display:block}.gameUI{po
   <section class="gameUI pausedOverlay hidden" id="pauseScreen"><div class="panel" id="pausePanel"><h2>ПАУЗА</h2><div class="actions"><button class="btn primary" id="resumeBtn">▶ ПРОДОЛЖИТЬ</button><button class="btn" id="menuFromPause">⌂ В МЕНЮ</button></div></div></section>
   <section class="gameUI hidden" id="endScreen"><div class="panel"><h2 class="winner" id="winnerText">ПОБЕДА!</h2><div class="scoreDetail" id="finalScore">5 : 2</div><div class="actions"><button class="btn primary" id="replayBtn">↻ РЕВАНШ</button><button class="btn" id="menuFromEnd">⌂ В МЕНЮ</button></div></div></section>
  </div>
- <div class="controlStrip" style="grid-template-columns:1fr"><div class="controlCard"><h3>УПРАВЛЕНИЕ</h3><p><span class="key">A</span> <span class="key">D</span> — движение &nbsp; <span class="key">ПРОБЕЛ</span> — прыжок / бросок (держать и отпускать) &nbsp; <span class="key">W</span> — блок &nbsp; <span class="key">Q</span> — данк &nbsp; <span class="key">Shift</span> — рывок</p></div></div>
+ <div class="controlStrip" style="grid-template-columns:1fr"><div class="controlCard"><h3>УПРАВЛЕНИЕ</h3><p><span class="key">A</span> <span class="key">D</span> — движение &nbsp; <span class="key">ПРОБЕЛ</span> — блок &nbsp; <span class="key">W</span> — прыжок / бросок (держать и отпускать) &nbsp; <span class="key">Q</span> — данк &nbsp; <span class="key">Shift</span> — рывок</p></div></div>
  <div class="footer"><span>ESC — ПАУЗА (СОЛО)</span><button id="footerMute">♫ Звук включён</button></div>
 </main>
 <script>
 (()=>{'use strict';
-const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+const canvas=document.getElementById('game');let ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
 const W=480,H=270,FLOOR=225,GRAV=.26,WIN=5;
 const $=id=>document.getElementById(id);
 const ui={menu:$('menu'),online:$('onlineScreen'),pause:$('pauseScreen'),end:$('endScreen'),hud:$('hud'),btns:$('gameBtns'),toast:$('toast')};
@@ -58,7 +58,69 @@ let audio=null;
 // Online: authoritative host, lightweight snapshots, reconnection and ping display.
 const net={socket:null,role:null,active:false,code:'',token:'',serverUrl:'',lastSnapshotAt:0,lastPhase:'',lastSeq:-1,
  reconnectTimer:null,reconnectAttempts:0,reconnectDeadline:0,epoch:0,suspended:false,pingAt:0,rtt:0,inputSeq:0,inputAck:0,inputRtt:0,lastLocalAction:0};
-let remoteKeys={},smoothPlayers=[],smoothBall=null;
+let remoteKeys={};
+// Snapshot timeline: smooth other players and the ball independently of packet arrival.
+// Keep guest's own low-latency local prediction unchanged.
+const SMOOTH_DELAY_MS=76, SNAPSHOT_PERIOD_MS=34;
+let visualHistory=[],visualOffset=NaN,visualJitter=0,visualLastArrival=0,visualPhase='';
+let renderFps=0,fpsSamples=0,fpsLastUpdate=0;
+let backgroundCache=null;
+function clearVisualHistory(){visualHistory=[];visualOffset=NaN;visualJitter=0;visualLastArrival=0;visualPhase='';}
+function storeVisualSnapshot(s){
+ if(!Number.isFinite(s.seq)||!Array.isArray(s.players)||s.players.length<2)return;
+ const now=performance.now(),arrivalGap=visualLastArrival?now-visualLastArrival:SNAPSHOT_PERIOD_MS;
+ const last=visualHistory[visualHistory.length-1];
+ // Never interpolate across score resets, round changes, reconnections or huge teleports.
+ if((last&&(s.seq-last.t>650||Math.abs(s.players[0].x-last.p.x)>85||
+    Math.abs(s.ball.x-last.b.x)>165||last.phase!==s.phase||last.roundStart!==s.roundStart))){clearVisualHistory();}
+ const measuredOffset=now-s.seq;
+ if(!Number.isFinite(visualOffset))visualOffset=measuredOffset;
+ else if(measuredOffset<visualOffset)visualOffset+=Math.max(-4,(measuredOffset-visualOffset)*.16);
+ else visualOffset+=Math.min(.03,(measuredOffset-visualOffset)*.001);
+ if(visualLastArrival&&arrivalGap>0&&arrivalGap<400){
+   const nominal=Math.max(17,Math.min(80,s.seq-(last?.t||s.seq-SNAPSHOT_PERIOD_MS)));
+   visualJitter=visualJitter*.88+Math.abs(arrivalGap-nominal)*.12;
+ }
+ visualLastArrival=now;
+ visualHistory.push({t:s.seq,p:s.players[0],b:s.ball,phase:s.phase,roundStart:s.roundStart});
+ if(visualHistory.length>14)visualHistory.shift();
+}
+function between(a,b,t){return a+(b-a)*t;}
+function sampleVisual(now){
+ if(!visualHistory.length)return null;
+ const history=visualHistory;
+ if(history.length===1)return {p:history[0].p,b:history[0].b};
+ // A modest adaptive jitter buffer avoids packet-to-packet jumps under VPN.
+ const target=now-visualOffset-SMOOTH_DELAY_MS-Math.min(35,visualJitter*.8);
+ let a=history[0],b=history[1],factor=0;
+ if(target<=a.t)return {p:a.p,b:a.b};
+ for(let i=1;i<history.length;i++){
+   b=history[i];a=history[i-1];
+   if(target<=b.t){factor=Math.max(0,Math.min(1,(target-a.t)/Math.max(1,b.t-a.t)));break;}
+   if(i===history.length-1){
+     // Very short bounded extrapolation hides single late/lost snapshots.
+     factor=1+Math.min(48,Math.max(0,target-b.t))/Math.max(1,b.t-a.t);
+   }
+ }
+ const pose={...b.p};
+ for(const key of ['x','y','vx','vy','run','anim','block','charge','shotPose','cool','dash']){
+   if(Number.isFinite(a.p[key])&&Number.isFinite(b.p[key]))pose[key]=between(a.p[key],b.p[key],factor);
+ }
+ if(a.p.dunk&&b.p.dunk&&Number.isFinite(a.p.dunk.progress)&&Number.isFinite(b.p.dunk.progress)){
+   pose.dunk={...b.p.dunk,progress:between(a.p.dunk.progress,b.p.dunk.progress,factor)};
+ }
+ if(a.p.finishDunk&&b.p.finishDunk&&a.p.finishDunk.variant===b.p.finishDunk.variant){
+   pose.finishDunk={...b.p.finishDunk,frame:between(a.p.finishDunk.frame,b.p.finishDunk.frame,factor)};
+ }
+ // Prevent visual extrapolation from leaving court boundaries.
+ pose.x=Math.max(19,Math.min(W-19,pose.x));
+ const bpos={...b.b};
+ if(a.b.owner===b.b.owner){
+   bpos.x=between(a.b.x,b.b.x,factor);bpos.y=between(a.b.y,b.b.y,factor);
+ }
+ return {p:pose,b:bpos};
+}
+
 // Guest predicts ONLY their own appearance. Host still decides scores, steals and hits.
 let guestPred=null,guestPredTime=0;
 const inputTimes=new Map();const localSoundAt=new Map();
@@ -74,12 +136,12 @@ function notifyInput(code,down){
 }
 function moveDirection(){return ((keys.KeyD||keys.ArrowRight)?1:0)-((keys.KeyA||keys.ArrowLeft)?1:0);}
 function predictAction(code,down){
- const p=guestPred;if(!p||p.stun>0||p.dunk||clock-roundStart<32||!down&&code!=='Space')return;
- if(!down){if(code==='Space'&&p.charging){p.charging=false;p.shotPose=20;p.charge=0;}return;}
- if(code==='Space'){
+ const p=guestPred;if(!p||p.stun>0||p.dunk||clock-roundStart<32||!down&&code!=='KeyW')return;
+ if(!down){if(code==='KeyW'&&p.charging){p.charging=false;p.shotPose=20;p.charge=0;}return;}
+ if(code==='KeyW'){
   if(ball.owner===1){if(!p.charging&&!p.shootCooldown){p.charging=true;p.charge=0;}}
   if(p.ground){p.vy=-5.75;p.ground=false;snd('jump');localSoundAt.set('jump',performance.now());}
- }else if(code==='KeyW'&&p.blockCooldown<=0){p.block=36;p.blockCooldown=55;snd('block');localSoundAt.set('block',performance.now());}
+ }else if(code==='Space'&&p.blockCooldown<=0){p.block=36;p.blockCooldown=55;snd('block');localSoundAt.set('block',performance.now());}
  else if((code==='ShiftLeft'||code==='ShiftRight')&&p.cool<=0){
   const dir=moveDirection()||p.facing||-1;
   p.dash=11;p.cool=65;p.vx=dir*(ball.owner===1?5.2:6);p.facing=dir;snd('dash');localSoundAt.set('dash',performance.now());
@@ -166,7 +228,8 @@ function netVisibility(){
  if(active){
   const info=net.rtt?' · СЕРВЕР '+Math.round(net.rtt)+' мс':'';
   const inputInfo=net.role==='guest'&&net.inputRtt?' · КОМАНДЫ '+Math.round(net.inputRtt)+' мс':'';
-  $('roomHud').textContent='ОНЛАЙН · '+net.code+' · '+(net.role==='host'?'P1':'P2')+info+inputInfo;
+  const fpsInfo=net.role==='guest'&&renderFps?' · FPS '+renderFps:'';
+  $('roomHud').textContent='ОНЛАЙН · '+net.code+' · '+(net.role==='host'?'P1':'P2')+info+inputInfo+fpsInfo;
  }
 }
 function closeOnline(){
@@ -179,7 +242,7 @@ function closeOnline(){
  }
  net.socket=null;net.active=false;net.role=null;net.code='';net.token='';net.serverUrl='';net.suspended=false;
  net.reconnectDeadline=0;net.reconnectAttempts=0;net.rtt=0;net.lastSeq=-1;
- remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();netVisibility();
+ remoteKeys={};clearVisualHistory();resetPrediction();netVisibility();
 }
 function showOnline(){
  closeOnline();phase='lobby';ui.menu.classList.add('hidden');ui.pause.classList.add('hidden');ui.end.classList.add('hidden');ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.online.classList.remove('hidden');
@@ -207,7 +270,7 @@ function showMatchUI(){
 function revertToLobby(message){
  clearTimeout(net.reconnectTimer);net.reconnectTimer=null;
  net.role=null;net.active=false;net.token='';net.code='';net.suspended=false;net.reconnectDeadline=0;
- remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();
+ remoteKeys={};clearVisualHistory();resetPrediction();
  phase='lobby';ui.hud.classList.add('hidden');ui.btns.classList.add('hidden');ui.end.classList.add('hidden');
  ui.online.classList.remove('hidden');$('onlineControls').classList.remove('hidden');$('inviteBox').classList.add('hidden');
  netVisibility();netText(message||'Соединение закрыто. Создай комнату или войди по коду.');
@@ -220,7 +283,7 @@ function scheduleReconnect(){
  if(!net.token||!net.code||!net.serverUrl)return revertToLobby('Связь с сервером потеряна. Попробуй подключиться снова.');
  if(!net.reconnectDeadline)net.reconnectDeadline=Date.now()+43000;
  if(Date.now()>=net.reconnectDeadline)return revertToLobby('Не удалось восстановить соединение за 45 секунд. Создай новую комнату.');
- net.suspended=true;netVisibility();
+ net.suspended=true;clearVisualHistory();netVisibility();
  const delay=Math.min(3600,450*Math.pow(1.55,net.reconnectAttempts++));
  netText('Переподключаемся к комнате…');
  clearTimeout(net.reconnectTimer);
@@ -265,14 +328,14 @@ function openNetSocket(mode,epoch){
   else if(msg.type==='start'){
    net.active=true;net.suspended=false;net.reconnectDeadline=0;net.reconnectAttempts=0;
    net.lastSnapshotAt=0;net.lastPhase='';net.lastSeq=-1;net.lastRemoteInputSeq=0;
-   remoteKeys={};smoothPlayers=[];smoothBall=null;resetPrediction();
+   remoteKeys={};clearVisualHistory();resetPrediction();
    $('replayBtn').disabled=false;$('replayBtn').textContent='↻ РЕВАНШ';
    start();netVisibility();
   }
   else if(msg.type==='resumed'){
    net.role=msg.player===0?'host':'guest';net.code=msg.code;net.token=msg.token;
    net.reconnectDeadline=0;net.reconnectAttempts=0;
-   net.suspended=!msg.active;
+   net.suspended=!msg.active;clearVisualHistory();
    if(msg.active){
     net.active=true;showMatchUI();
     if(phase==='lobby')start();
@@ -281,10 +344,10 @@ function openNetSocket(mode,epoch){
    netVisibility();
   }
   else if(msg.type==='peer_disconnected'){
-   net.suspended=true;remoteKeys={};if(net.role==='host'&&players[1]?.charging){players[1].charging=false;players[1].charge=0;}netVisibility();
+   net.suspended=true;clearVisualHistory();remoteKeys={};if(net.role==='host'&&players[1]?.charging){players[1].charging=false;players[1].charge=0;}netVisibility();
   }
   else if(msg.type==='peer_reconnected'){
-   net.suspended=false;net.active=true;netVisibility();
+   net.suspended=false;net.active=true;clearVisualHistory();netVisibility();
    if(net.role==='guest')replayHeldKeys();
   }
   else if(msg.type==='resync_request'&&net.role==='host'){publishSnapshot(true)}
@@ -321,7 +384,7 @@ function remoteInput(msg){
  if(Number.isSafeInteger(msg.seq)&&msg.seq>0)net.lastRemoteInputSeq=Math.max(net.lastRemoteInputSeq||0,msg.seq);
  const was=!!remoteKeys[msg.code];
  if(msg.down){remoteKeys[msg.code]=true;if(!was)doAction(players[1],action)}
- else{delete remoteKeys[msg.code];if(msg.code==='Space')releaseCharge(players[1])}
+ else{delete remoteKeys[msg.code];if(msg.code==='KeyW')releaseCharge(players[1])}
 }
 function loadSnapshot(s){
  if(!Array.isArray(s.players)||!s.ball||!Array.isArray(s.points))return;
@@ -330,11 +393,8 @@ function loadSnapshot(s){
  const was=phase;
  phase=s.phase;clock=s.clock;roundStart=s.roundStart;points=s.points;
  players=s.players;ball=s.ball;
- if(net.role==='guest')reconcileGuest(s.players[1],s.inputAck);
+ if(net.role==='guest'){storeVisualSnapshot(s);reconcileGuest(s.players[1],s.inputAck);}
  if(phase==='playing'&&clock-roundStart<34&&guestPred&&Math.abs(guestPred.x-s.players[1].x)>45)guestPred={...s.players[1]};particles=s.particles||[];trails=s.trails||[];waves=s.waves||[];glassFX=s.glassFX;glassShards=s.glassShards||[];flash=s.flash||0;shake=s.shake||0;
- if(!smoothPlayers.length)smoothPlayers=players.map(p=>({x:p.x,y:p.y}));
- if(!smoothBall)smoothBall={x:ball.x,y:ball.y};
- if(Math.abs(ball.x-smoothBall.x)>65||Math.abs(ball.y-smoothBall.y)>75){smoothBall.x=ball.x;smoothBall.y=ball.y}
  $('scoreL').textContent=points[0];$('scoreR').textContent=points[1];
  if(s.toastTimer>0){ui.toast.textContent=s.toast;ui.toast.classList.remove('hidden')}else ui.toast.classList.add('hidden');
  if(phase==='ended'&&was!=='ended')showEndUI();
@@ -343,7 +403,7 @@ function loadSnapshot(s){
 function publishSnapshot(force=false){
  if(net.role!=='host'||!net.active||net.socket?.readyState!==WebSocket.OPEN)return;
  const now=performance.now(),changed=net.lastPhase!==phase;
- if(!force&&!changed&&now-net.lastSnapshotAt<50)return; // 20 Hz, no bursts on catch-up.
+ if(!force&&!changed&&now-net.lastSnapshotAt<SNAPSHOT_PERIOD_MS)return; // ~30 Hz, no catch-up bursts.
  if(!force&&!changed&&phase!=='playing'&&phase!=='goal')return;
  if(net.socket.bufferedAmount>28*1024)return; // drop stale frames instead of queuing delay.
  const state={seq:Math.floor(now),inputAck:net.lastRemoteInputSeq||0,phase,clock,roundStart,points,
@@ -361,7 +421,15 @@ function doAction(p,action){
 
 const rand=(a,b)=>a+Math.random()*(b-a),clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),sign=v=>v<0?-1:1;
 function snd(type){if(net.role==='host'&&net.active)netSend({type:'sfx',name:type});if(mute)return;try{audio??=new (window.AudioContext||window.webkitAudioContext)();if(audio.state==='suspended')audio.resume();const now=audio.currentTime;const notes={jump:[245,345,.09,'square'],dash:[600,150,.22,'sawtooth'],grab:[450,750,.1,'triangle'],shot:[640,250,.18,'square'],score:[450,880,.33,'triangle'],hit:[155,85,.1,'square'],win:[540,1050,.5,'triangle'],dunk:[180,660,.31,'sawtooth'],perfect:[650,1200,.26,'triangle'],fail:[220,90,.25,'sawtooth'],block:[310,105,.23,'square'],glass:[1200,330,.44,'triangle'],steal:[370,720,.13,'triangle'],click:[530,680,.06,'square']};const [lo,hi,dur,wave]=notes[type]||notes.click;const o=audio.createOscillator(),g=audio.createGain();o.type=wave;o.frequency.setValueAtTime(lo,now);o.frequency.exponentialRampToValueAtTime(Math.max(1,hi),now+dur);g.gain.setValueAtTime(.0001,now);g.gain.exponentialRampToValueAtTime(type==='score'?.085:.045,now+.008);g.gain.exponentialRampToValueAtTime(.0001,now+dur);o.connect(g);g.connect(audio.destination);o.start(now);o.stop(now+dur+.01)}catch(_){}}
-function initBackdrop(){stars=Array.from({length:70},()=>({x:rand(0,W),y:rand(5,145),s:Math.random()>.8?2:1,t:rand(0,6)}));crowd=Array.from({length:87},(_,i)=>({x:3+i*5.55,y:rand(173,184),c:['#687fbb','#c05c9a','#6fbbbe','#e3a576','#7a70a5'][i%5]}))}
+function initBackdrop(){
+ stars=Array.from({length:70},()=>({x:rand(0,W),y:rand(5,145),s:Math.random()>.8?2:1,t:rand(0,6)}));
+ crowd=Array.from({length:87},(_,i)=>({x:3+i*5.55,y:rand(173,184),c:['#687fbb','#c05c9a','#6fbbbe','#e3a576','#7a70a5'][i%5]}));
+ // Most of the background never changes: pre-render it once instead of hundreds
+ // of draw calls every frame, particularly useful on slower laptops/VPN browsers.
+ const backing=document.createElement('canvas');backing.width=W;backing.height=H;
+ const realCtx=ctx;ctx=backing.getContext('2d');ctx.imageSmoothingEnabled=false;
+ try{background();backgroundCache=backing;}finally{ctx=realCtx;}
+}
 function player(team){return {team,x:team===0?151:329,y:FLOOR-19,vx:0,vy:0,w:12,h:19,facing:team===0?1:-1,ground:true,dash:0,cool:0,stun:0,grabBlock:0,anim:0,shootCooldown:0,aiCooldown:0,move:0,run:0,ghosts:[],charging:false,charge:0,dunk:null,dunkCooldown:0,protected:0,block:0,blockCooldown:0,stealLock:0,shotPose:0,finishDunk:null}}
 function resetBall(){ball={x:W/2,y:106,vx:rand(-1.3,1.3),vy:-.5,r:5,owner:-1,spin:0,lastTouch:-1,freeTime:0,scored:false,invalidDunk:false,netEntry:-1,netEntryAge:0};trails=[]}
 function resetRound(){players=[player(0),player(1)];resetBall();glassFX=null;glassShards=[];roundStart=clock;aiNext=clock+20;keys={}}
@@ -404,7 +472,7 @@ function drawGlass(){
  ctx.restore();
 }
 function hoop(team){return {x:team===0?66:414,y:112,side:team===0?-1:1}}
-// When not holding the ball, Space jumps. While holding the ball, Space starts a jump shot.
+// When not holding the ball, W jumps. While holding the ball, W starts a jump shot.
 function jumpOnly(p){
  if(p.stun>0||p.dunk||!p.ground||clock-roundStart<32)return;
  p.vy=-5.75;p.ground=false;
@@ -421,7 +489,7 @@ function doJump(p){
 function beginCharge(p){
  if(p.charging||ball.owner!==p.team||p.dunk||p.stun>0||p.shootCooldown>0||clock-roundStart<32)return;
  p.charging=true;p.charge=0;
- // Restore the original Space jump-shot: take off at the start of the meter.
+ // Start the W jump-shot: take off at the start of the meter.
  if(p.ground)jumpOnly(p);
 }
 function releaseCharge(p){
@@ -565,12 +633,12 @@ function tryBlockBall(ax=ball.x,ay=ball.y,bx=ball.x,by=ball.y){
  return false;
 }
 function controls(code){
- if(code==='Space')return 'jumpShot';
+ if(code==='KeyW')return 'jumpShot';
  if(code==='KeyA'||code==='ArrowLeft')return 'left';
  if(code==='KeyD'||code==='ArrowRight')return 'right';
  if(code==='ShiftLeft'||code==='ShiftRight')return 'sprint';
  if(code==='KeyQ')return 'dunk';
- if(code==='KeyW')return 'block';
+ if(code==='Space')return 'block';
  return null;
 }
 window.addEventListener('keydown',e=>{
@@ -584,7 +652,7 @@ window.addEventListener('keydown',e=>{
 });
 window.addEventListener('keyup',e=>{
  if(net.role==='guest'&&net.active&&keys[e.code])notifyInput(e.code,false);
- else if(e.code==='Space'&&phase==='playing')releaseCharge(players[0]);
+ else if(e.code==='KeyW'&&phase==='playing')releaseCharge(players[0]);
  delete keys[e.code];
 });
 window.addEventListener('blur',()=>{
@@ -909,7 +977,7 @@ function update(){clock++;if(toastTimer>0){toastTimer--;if(toastTimer===0)hideTo
  physicsPlayer(players[0]);physicsPlayer(players[1]);if(!net.active)aiStep();collisionPlayers();advanceBall();if(phase==='playing'){pickup();}}
 function rect(x,y,w,h,color){ctx.fillStyle=color;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h))}
 function text(t,x,y,size=10,color='#fff',align='left'){ctx.textAlign=align;ctx.textBaseline='middle';ctx.font=`900 ${size}px monospace`;ctx.fillStyle='#0a1430';ctx.fillText(t,x+1,y+2);ctx.fillStyle=color;ctx.fillText(t,x,y)}
-function background(){const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#101938');g.addColorStop(.7,'#334778');g.addColorStop(1,'#536a86');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);rect(0,0,W,9,'#070d20');for(let i=0;i<stars.length;i++){const s=stars[i];rect(s.x,s.y,s.s,s.s,Math.sin(clock*.045+s.t)>0.1?'#9da8d8':'#576b9f')}
+function background(){if(backgroundCache){ctx.drawImage(backgroundCache,0,0);return;}const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#101938');g.addColorStop(.7,'#334778');g.addColorStop(1,'#536a86');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);rect(0,0,W,9,'#070d20');for(let i=0;i<stars.length;i++){const s=stars[i];rect(s.x,s.y,s.s,s.s,Math.sin(clock*.045+s.t)>0.1?'#9da8d8':'#576b9f')}
  // distant skyline
  for(let i=0;i<24;i++){const x=i*23-5,h=18+(i*29%38),y=156-h;rect(x,y,19,h,'#1b2a50');for(let j=0;j<4;j++)if((i+j)%3!==0)rect(x+4+j%2*7,y+6+Math.floor(j/2)*12,2,3,'#8793b4')}
  rect(0,154,W,3,'#5477a5');rect(0,158,W,29,'#263c67');for(let i=0;i<crowd.length;i++){const c=crowd[i];rect(c.x,c.y-9,4,4,c.c);rect(c.x-1,c.y-5,6,6,i%4===0?'#d0abc8':'#586b9b')}rect(0,187,W,5,'#405782');rect(0,192,W,2,'#7e95b6');
@@ -1035,10 +1103,12 @@ function drawShotMeter(){
  rect(x,y+h-filled,w,filled,over?'#ff5768':progress>=.82?'#8affab':'#f7b666');
  rect(x-4,y+h-filled-1,w+8,3,'#ffffff');
  text('БРОСОК',x+8,y-14,8,'#f2f8ff','center');
- text(over?'ПОЗДНО!':progress>=.82?'PERFECT!':'SPACE',x+8,y+h+12,8,over?'#ff9c9c':progress>=.82?'#9effad':'#ffe7bf','center');
+ text(over?'ПОЗДНО!':progress>=.82?'PERFECT!':'W',x+8,y+h+12,8,over?'#ff9c9c':progress>=.82?'#9effad':'#ffe7bf','center');
 }
 function draw(){ctx.save();ctx.clearRect(0,0,W,H);if(shake>0)ctx.translate(rand(-shake,shake)*.32,rand(-shake,shake)*.24);background();drawHoop(0);drawHoop(1);if(players.length){for(const p of players)drawPlayer(p)}drawBall();drawHoop(0,true);drawHoop(1,true);for(const q of particles)rect(q.x,q.y,q.sz,q.sz,q.color);drawGlass();for(const a of waves){ctx.globalAlpha=a.life/a.max*.75;ctx.strokeStyle=a.color;ctx.lineWidth=1.3;ctx.strokeRect(Math.round(a.x-a.radius-(1-a.life/a.max)*a.scale*10),Math.round(a.y-a.radius-(1-a.life/a.max)*a.scale*10),Math.round((a.radius+(1-a.life/a.max)*a.scale*10)*2),Math.round((a.radius+(1-a.life/a.max)*a.scale*10)*2));ctx.globalAlpha=1;}if(phase==='playing'&&clock-roundStart<31){text('3 ... 2 ... 1',W/2,173,13,'#ffedab','center')}drawShotMeter();if(flash>0){ctx.globalAlpha=flash/34;rect(0,0,W,H,'#fffce1');ctx.globalAlpha=1}ctx.restore()}
 function loop(now){
+ fpsSamples++;if(!fpsLastUpdate)fpsLastUpdate=now;
+ if(now-fpsLastUpdate>=1000){renderFps=Math.round(fpsSamples*1000/(now-fpsLastUpdate));fpsSamples=0;fpsLastUpdate=now;if(net.role==='guest'&&net.active)netVisibility();}
  if(net.socket?.readyState===WebSocket.OPEN&&now-net.pingAt>2800){net.pingAt=now;netSend({type:'ping',t:Date.now()})}
  if(!frameLast)frameLast=now;
  let elapsed=Math.min(90,now-frameLast);frameLast=now;
@@ -1047,15 +1117,13 @@ function loop(now){
   // hundreds of milliseconds. All goals/hits still come from the host.
   accum+=elapsed;let steps=0;
   while(accum>=1000/60&&steps<5){tickPrediction();accum-=1000/60;steps++;}
-  if(players.length&&smoothPlayers.length===players.length){
+  if(players.length){
    const authoritativePlayers=players,authoritativeBall=ball;
-   const other=smoothPlayers[0],auth=players[0];
-   other.x+=(auth.x-other.x)*.65;other.y+=(auth.y-other.y)*.65;
-   smoothBall.x+=(ball.x-smoothBall.x)*.65;smoothBall.y+=(ball.y-smoothBall.y)*.65;
-   players=[{...auth,x:other.x,y:other.y},guestPred?{...players[1],...guestPred}:players[1]];
-   ball={...ball,x:smoothBall.x,y:smoothBall.y};
-   if(ball.owner===1&&guestPred){ball.x=guestPred.x+guestPred.facing*8;ball.y=guestPred.y-6;}
-   draw();players=authoritativePlayers;ball=authoritativeBall;
+   const visual=sampleVisual(now);
+   players=[visual?visual.p:players[0],guestPred?{...players[1],...guestPred}:players[1]];
+   ball=visual?visual.b:ball;
+   if(ball.owner===1&&guestPred){ball={...ball,x:guestPred.x+guestPred.facing*8,y:guestPred.y-6};}
+   try{draw();}finally{players=authoritativePlayers;ball=authoritativeBall;}
   }else draw();
  }else{
   if(net.active&&net.suspended){accum=0;}
