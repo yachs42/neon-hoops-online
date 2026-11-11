@@ -1,0 +1,8 @@
+{
+  "name": "neon-hoops-online",
+  "version": "7.0.0",
+  "private": true,
+  "description": "NEON HOOPS 1v1 online rooms and solo mode",
+  "scripts": { "start": "node server.js", "test": "node --check server.js" },
+  "engines": { "node": ">=18" }
+}
